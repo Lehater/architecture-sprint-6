@@ -1,0 +1,90 @@
+@startuml
+title "InsureTech — Технологическая архитектура (Multi-AZ Kubernetes)"
+
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+skinparam rectangle {
+  BackgroundColor white
+  BorderColor black
+}
+skinparam cloud {
+  BackgroundColor #EEF9FF
+  BorderColor #AAAAAA
+}
+
+actor "Пользователь / B2B-партнёр" as User
+
+rectangle "CDN" as CDN {
+  note as nCDN
+    • Раздача статики (HTML, CSS, JS, изображения)
+    • Кеш в POP-узлах
+    • Прокидывание динамического трафика
+  end note
+}
+
+cloud "Multi-AZ Kubernetes\n(AZ1, AZ2, AZ3)" as K8s {
+
+  rectangle "Ingress Controller\n(NGINX/Treafik)" as Ingress {
+    note as nIngress
+      - Принимает HTTPS/HTTP
+      - L7-балансировка (Round Robin / Least Conn)
+      - Health-check Pod’ов (Readiness Probe)
+    end note
+  }
+
+  package "Сервисы (Deployments)" as Services {
+    rectangle "core-app\n(2+ Pod'а)" as CoreApp
+    rectangle "client-info\n(2+ Pod'а)" as ClientInfo
+    rectangle "ins-product-aggregator\n(2+ Pod'а)" as Aggregator
+    rectangle "ins-comp-settlement\n(2+ Pod'а)" as Settlement
+  }
+
+  package "PostgreSQL (Patroni/Stolon)" as Postgres {
+    note as nPostgres
+      - Master: AZ1
+      - Standby (sync): AZ2
+      - При необходимости: Read-Replica (AZ3)
+      - Автофейловер (Patroni)
+    end note
+
+    component "Master DB" as Master
+    component "Standby DB" as Standby
+    ' (Необязательно) component "Read Replica" as Replica
+  }
+}
+
+rectangle "Object Storage" as ObjStorage {
+  note as nBackup
+    - Ежедневные полные бэкапы (pg_basebackup)
+    - WAL-архив для PITR
+    - Хранение в другой AZ/регионе
+  end note
+}
+
+' ================== Взаимодействия ======================
+
+' 1) Пользователи -> CDN -> Ingress
+User --> CDN : Запрос статики\nили переход к динамике
+CDN --> Ingress : Прокидывание\nдинамических запросов (REST API)
+
+' 2) Входящий трафик -> Сервисы
+Ingress --> CoreApp
+Ingress --> ClientInfo
+Ingress --> Aggregator
+Ingress --> Settlement
+
+' 3) Сервисы -> БД
+CoreApp --> Master : Чтение/Запись
+ClientInfo --> Master : Чтение/Запись
+Aggregator --> Master : Чтение/Запись
+Settlement --> Master : Чтение/Запись
+
+' 4) Репликация
+Master --> Standby : Синхронная репликация
+' (Опционально: Master --> Replica : Асинхронная репликация)
+
+' 5) Бэкапы
+Master --> ObjStorage : Архивация WAL/бэкапы
+Standby --> ObjStorage : (Опционально, если Patroni настроен так)
+
+@enduml
